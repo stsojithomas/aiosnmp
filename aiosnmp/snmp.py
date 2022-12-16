@@ -2,15 +2,18 @@ __all__ = ("Snmp",)
 
 import ipaddress
 from types import TracebackType
-from typing import Any, List, Optional, Tuple, Type, Union
+from typing import Any, List, Optional, Tuple, Type, Union, Dict
 
 from .asn1 import Number
 from .connection import SnmpConnection
 from .exceptions import SnmpUnsupportedValueType
-from .message import GetBulkRequest, GetNextRequest, GetRequest, SetRequest, SnmpMessage, SnmpVarbind, SnmpVersion
+from .message import GetBulkRequest, GetNextRequest, GetRequest, SetRequest, SnmpMessage, SnmpVarbind, SnmpVersion, \
+    SnmpResponse
+from .security import UserSecurityModel, MsgGlobalData, MsgFlags
 
 SetParamsWithoutType = Tuple[str, Union[int, str, bytes, ipaddress.IPv4Address]]
 SetParamsWithType = Tuple[str, Union[int, str, bytes, ipaddress.IPv4Address], Optional[Number]]
+RequestsKey = Union[Tuple[str, int, int], int]
 
 
 class Snmp(SnmpConnection):
@@ -37,22 +40,26 @@ class Snmp(SnmpConnection):
 
     """
 
-    __slots__ = ("version", "community", "non_repeaters", "max_repetitions")
+    __slots__ = ("version", "community", "usm_security_params",
+                 "non_repeaters", "max_repetitions", "discovered_requests")
 
     def __init__(
-        self,
-        *,
-        version: SnmpVersion = SnmpVersion.v2c,
-        community: str = "public",
-        non_repeaters: int = 0,
-        max_repetitions: int = 10,
-        **kwargs: Any,
+            self,
+            *,
+            version: SnmpVersion = SnmpVersion.v2c,
+            community: str = "public",
+            usm_security_params: UserSecurityModel = None,
+            non_repeaters: int = 0,
+            max_repetitions: int = 10,
+            **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.version: SnmpVersion = version
         self.community: str = community
         self.non_repeaters: int = non_repeaters
         self.max_repetitions: int = max_repetitions
+        self.usm_security_params: UserSecurityModel = usm_security_params
+        self.discovered_requests: Dict[RequestsKey, UserSecurityModel] = {}
 
     async def __aenter__(self) -> "Snmp":
         if not self.is_connected:
@@ -61,15 +68,15 @@ class Snmp(SnmpConnection):
         return self
 
     async def __aexit__(
-        self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_val: Optional[BaseException],
+            exc_tb: Optional[TracebackType],
     ) -> Optional[bool]:
         self.close()
         return None
 
-    async def _send(self, message: SnmpMessage) -> List[SnmpVarbind]:
+    async def _send(self, message: SnmpMessage) -> SnmpResponse:
         if not self._closed and self._protocol is None:
             await self._connect()
 
@@ -96,8 +103,31 @@ class Snmp(SnmpConnection):
         """
         if isinstance(oids, str):
             oids = [oids]
-        message = SnmpMessage(self.version, self.community, GetRequest([SnmpVarbind(oid) for oid in oids]))
-        return await self._send(message)
+        if self.version == SnmpVersion.v3:
+            discovery_usm = UserSecurityModel()
+            print(str(discovery_usm))
+            discovery_message = SnmpMessage(self.version,
+                                            self.community,
+                                            discovery_usm,
+                                            GetRequest([]))
+            response: SnmpResponse = await self._send(discovery_message)
+            discovered_usm = response.usm_security_params
+            self.usm_security_params.add_discovered_params(discovered_usm=discovered_usm)
+            self.usm_security_params.msg_global_data.set_flag_value(
+                MsgFlags.FLAG_REPORTABLE)
+            request_message = SnmpMessage(self.version,
+                                          self.community,
+                                          self.usm_security_params,
+                                          GetRequest([SnmpVarbind(oid) for oid in oids]))
+            response: SnmpResponse = await self._send(request_message)
+            return response.data.varbinds
+
+        message = SnmpMessage(self.version,
+                              self.community,
+                              self.usm_security_params,
+                              GetRequest([SnmpVarbind(oid) for oid in oids]))
+        response: SnmpResponse = await self._send(message)
+        return response.data.varbinds
 
     async def get_next(self, oids: Union[str, List[str]]) -> List[SnmpVarbind]:
         """The get_next method retrieves the value of the next OID in the tree.
@@ -110,16 +140,17 @@ class Snmp(SnmpConnection):
         message = SnmpMessage(
             self.version,
             self.community,
+            self.usm_security_params,
             GetNextRequest([SnmpVarbind(oid) for oid in oids]),
         )
         return await self._send(message)
 
     async def get_bulk(
-        self,
-        oids: Union[str, List[str]],
-        *,
-        non_repeaters: Optional[int] = None,
-        max_repetitions: Optional[int] = None,
+            self,
+            oids: Union[str, List[str]],
+            *,
+            non_repeaters: Optional[int] = None,
+            max_repetitions: Optional[int] = None,
     ) -> List[SnmpVarbind]:
         """The get_bulk method performs a continuous get_next operation based on the max_repetitions value.
         The non_repeaters value determines the number of variables in the
@@ -137,6 +168,7 @@ class Snmp(SnmpConnection):
         message = SnmpMessage(
             self.version,
             self.community,
+            self.usm_security_params,
             GetBulkRequest([SnmpVarbind(oid) for oid in oids], nr, mr),
         )
         return await self._send(message)
@@ -153,12 +185,18 @@ class Snmp(SnmpConnection):
         vbs = await self._send(message)
         next_oid = vbs[0].oid
         if not next_oid.startswith(f"{base_oid}."):
-            message = SnmpMessage(self.version, self.community, GetRequest([SnmpVarbind(base_oid)]))
+            message = SnmpMessage(self.version,
+                                  self.community,
+                                  self.usm_security_params,
+                                  GetRequest([SnmpVarbind(base_oid)]))
             return await self._send(message)
 
         varbinds.append(vbs[0])
         while True:
-            message = SnmpMessage(self.version, self.community, GetNextRequest([SnmpVarbind(next_oid)]))
+            message = SnmpMessage(self.version,
+                                  self.community,
+                                  self.usm_security_params,
+                                  GetNextRequest([SnmpVarbind(next_oid)]))
             vbs = await self._send(message)
             next_oid = vbs[0].oid
             if not next_oid.startswith(f"{base_oid}."):
@@ -200,15 +238,18 @@ class Snmp(SnmpConnection):
 
             snmp_varbinds.append(SnmpVarbind(oid, value, number))
 
-        message = SnmpMessage(self.version, self.community, SetRequest(snmp_varbinds))
+        message = SnmpMessage(self.version,
+                              self.community,
+                              self.usm_security_params,
+                              SetRequest(snmp_varbinds))
         return await self._send(message)
 
     async def bulk_walk(
-        self,
-        oid: str,
-        *,
-        non_repeaters: Optional[int] = None,
-        max_repetitions: Optional[int] = None,
+            self,
+            oid: str,
+            *,
+            non_repeaters: Optional[int] = None,
+            max_repetitions: Optional[int] = None,
     ) -> List[SnmpVarbind]:
         """The bulk_walk method uses get_bulk requests to query a network entity efficiently for a tree of information.
 
@@ -225,6 +266,7 @@ class Snmp(SnmpConnection):
         message = SnmpMessage(
             self.version,
             self.community,
+            self.usm_security_params,
             GetBulkRequest([SnmpVarbind(base_oid)], nr, mr),
         )
         vbs: List[SnmpVarbind] = await self._send(message)
@@ -235,6 +277,7 @@ class Snmp(SnmpConnection):
                     message = SnmpMessage(
                         self.version,
                         self.community,
+                        self.usm_security_params,
                         GetRequest([SnmpVarbind(base_oid)]),
                     )
                     return await self._send(message)
@@ -245,6 +288,7 @@ class Snmp(SnmpConnection):
             message = SnmpMessage(
                 self.version,
                 self.community,
+                self.usm_security_params,
                 GetBulkRequest([SnmpVarbind(next_oid)], nr, mr),
             )
             vbs = await self._send(message)

@@ -121,7 +121,7 @@ class SnmpProtocol(asyncio.DatagramProtocol):
                 if exception:
                     self.requests[key].set_exception(exception)
                 else:
-                    self.requests[key].set_result(message.data.varbinds)
+                    self.requests[key].set_result(message)
             except asyncio.InvalidStateError:
                 del self.requests[key]
 
@@ -129,7 +129,7 @@ class SnmpProtocol(asyncio.DatagramProtocol):
     def is_connected(self) -> bool:
         return bool(self.transport is not None and not self.transport.is_closing())
 
-    async def _send(self, message: SnmpMessage, addr: Address) -> List[SnmpVarbind]:
+    async def _send(self, message: SnmpMessage, addr: Address) -> SnmpResponse:
         host, port = addr[0], addr[1]
         key: RequestsKey = (
             (host, port, message.data.request_id) if self.validate_source_addr else message.data.request_id
@@ -143,7 +143,7 @@ class SnmpProtocol(asyncio.DatagramProtocol):
             if not done:
                 continue
 
-            r: List[SnmpVarbind] = fut.result()
+            r: SnmpResponse = fut.result()
             return r
 
         fut.cancel()

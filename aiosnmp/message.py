@@ -11,6 +11,7 @@ __all__ = (
     "SnmpV2TrapMessage",
 )
 
+import binascii
 import enum
 import ipaddress
 import random
@@ -18,6 +19,7 @@ from typing import List, Optional, Union
 
 from .asn1 import Class, Number
 from .asn1_rust import Decoder, Encoder
+from .security import UserSecurityModel, MsgGlobalData
 
 
 class SnmpVersion(enum.IntEnum):
@@ -42,10 +44,10 @@ class SnmpVarbind:
     __slots__ = ("_oid", "_value", "_number")
 
     def __init__(
-        self,
-        oid: str,
-        value: Union[None, str, int, bytes, ipaddress.IPv4Address] = None,
-        number: Optional[Number] = None,
+            self,
+            oid: str,
+            value: Union[None, str, int, bytes, ipaddress.IPv4Address] = None,
+            number: Optional[Number] = None,
     ) -> None:
         self._oid: str = oid.lstrip(".")
         self._value: Union[None, str, int, bytes, ipaddress.IPv4Address] = value
@@ -154,19 +156,38 @@ PDUs = Union[PDU, BulkPDU]
 
 
 class SnmpMessage:
-    __slots__ = ("version", "community", "data")
+    __slots__ = ("version", "community", "usm_security_params", "data")
 
-    def __init__(self, version: SnmpVersion, community: str, data: PDUs) -> None:
+    def __init__(self, version: SnmpVersion,
+                 community: str,
+                 usm_security_params: UserSecurityModel,
+                 data: PDUs) -> None:
         self.version: SnmpVersion = version
         self.community: str = community
         self.data: PDUs = data
+        self.usm_security_params = usm_security_params
 
     def encode(self) -> bytes:
+        if self.version == SnmpVersion.v3:
+            return self._encode_v3()
         encoder = Encoder()
         encoder.enter(Number.Sequence)
         encoder.write(self.version, Number.Integer)
         encoder.write(self.community, Number.OctetString)
         self.data.encode(encoder)
+        encoder.exit()
+        return encoder.output()
+
+    def _encode_v3(self):
+        encoder = Encoder()
+        encoder.enter(Number.Sequence)
+        encoder.write(self.version, Number.Integer)
+        self.usm_security_params.encode(encoder)
+        encoder.enter(Number.Sequence)
+        encoder.write(self.usm_security_params.context_engine_id, Number.OctetString)
+        encoder.write(self.usm_security_params.context_engine_name, Number.OctetString)
+        self.data.encode(encoder)
+        encoder.exit()
         encoder.exit()
         return encoder.output()
 
@@ -178,6 +199,11 @@ class SnmpResponse(SnmpMessage):
         decoder.enter()  # 1
         tag, value = decoder.read()
         version = SnmpVersion(value)
+        print(f"version: {version}")
+        if version == SnmpVersion.v3:
+            snmp_response: SnmpResponse = SnmpResponse.decode_v3(version, decoder)
+            decoder.exit()  # 1
+            return snmp_response
 
         tag, value = decoder.read()
         community = value.decode()
@@ -212,7 +238,57 @@ class SnmpResponse(SnmpMessage):
         response.request_id = request_id
         response.error_status = error_status
         response.error_index = error_index
-        return cls(version, community, response)
+        return cls(version=version, community=community, usm_security_params=None, data=response)
+
+    @classmethod
+    def decode_v3(cls, version: SnmpVersion, decoder: Decoder) -> "SnmpResponse":
+
+        msg_global_data: MsgGlobalData = MsgGlobalData.decode(decoder)
+        print(str(msg_global_data))
+        usm: UserSecurityModel = UserSecurityModel.decode(decoder)
+        usm.msg_global_data = msg_global_data
+
+        decoder.enter()  # msgData
+        tag, value = decoder.read()
+        context_engine_id = str(binascii.hexlify(value), 'UTF-8')
+        usm.context_engine_id = context_engine_id
+        tag, value = decoder.read()
+        usm.context_engine_name = value
+
+        decoder.enter()  # data
+        tag, value = decoder.read()
+        request_id = value
+
+        tag, value = decoder.read()
+        error_status = value
+
+        tag, value = decoder.read()
+        error_index = value
+
+        decoder.enter()  # variable-bindings
+        varbinds: List[SnmpVarbind] = []
+        while not decoder.eof():
+            decoder.enter()  # variable-binding
+            _, value = decoder.read()
+            oid = value
+            _, value = decoder.read()
+            varbinds.append(SnmpVarbind(oid, value))
+            decoder.exit()  # variable-binding
+
+        decoder.exit()  # variable-bindings
+
+        decoder.exit()  # data
+
+        decoder.exit()  # msgData
+
+        response = GetResponse(varbinds)
+        response.request_id = request_id
+        response.error_status = error_status
+        response.error_index = error_index
+        return cls(version=version,
+                   community='',
+                   usm_security_params=usm,
+                   data=response)
 
 
 class SnmpV2TrapMessage:
