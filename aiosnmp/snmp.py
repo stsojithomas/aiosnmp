@@ -9,7 +9,7 @@ from .connection import SnmpConnection
 from .exceptions import SnmpUnsupportedValueType
 from .message import GetBulkRequest, GetNextRequest, GetRequest, SetRequest, SnmpMessage, SnmpVarbind, SnmpVersion, \
     SnmpResponse
-from .security import UserSecurityModel, MsgGlobalData, MsgFlags
+from .security import UserSecurityModel, MsgGlobalData, MsgFlags, UserSecurityParams
 
 SetParamsWithoutType = Tuple[str, Union[int, str, bytes, ipaddress.IPv4Address]]
 SetParamsWithType = Tuple[str, Union[int, str, bytes, ipaddress.IPv4Address], Optional[Number]]
@@ -48,7 +48,7 @@ class Snmp(SnmpConnection):
             *,
             version: SnmpVersion = SnmpVersion.v2c,
             community: str = "public",
-            usm_security_params: UserSecurityModel = None,
+            usm_security_params: UserSecurityParams = None,
             non_repeaters: int = 0,
             max_repetitions: int = 10,
             **kwargs: Any,
@@ -58,7 +58,7 @@ class Snmp(SnmpConnection):
         self.community: str = community
         self.non_repeaters: int = non_repeaters
         self.max_repetitions: int = max_repetitions
-        self.usm_security_params: UserSecurityModel = usm_security_params
+        self.usm_security_params: UserSecurityParams = usm_security_params
         self.discovered_requests: Dict[RequestsKey, UserSecurityModel] = {}
 
     async def __aenter__(self) -> "Snmp":
@@ -111,20 +111,24 @@ class Snmp(SnmpConnection):
                                             discovery_usm,
                                             GetRequest([]))
             response: SnmpResponse = await self._send(discovery_message)
-            discovered_usm = response.usm_security_params
-            self.usm_security_params.add_discovered_params(discovered_usm=discovered_usm)
-            self.usm_security_params.msg_global_data.set_flag_value(
-                MsgFlags.FLAG_REPORTABLE)
+            discovered_usm: UserSecurityModel = response.usm_security_model
+            print(str(discovered_usm))
+            request_usm: UserSecurityModel = UserSecurityModel(usm_params=self.usm_security_params)
+            request_usm.add_discovered_params(discovered_usm=discovered_usm)
+            # self.usm_security_params.msg_global_data.set_flag_value(
+            #    MsgFlags.FLAG_REPORTABLE)
+            request_usm.msg_global_data.set_flag_value(MsgFlags.FLAG_PRIV | MsgFlags.FLAG_AUTH | MsgFlags.FLAG_REPORTABLE)
+            print(str(request_usm))
             request_message = SnmpMessage(self.version,
                                           self.community,
-                                          self.usm_security_params,
+                                          request_usm,
                                           GetRequest([SnmpVarbind(oid) for oid in oids]))
             response: SnmpResponse = await self._send(request_message)
             return response.data.varbinds
 
         message = SnmpMessage(self.version,
                               self.community,
-                              self.usm_security_params,
+                              None,
                               GetRequest([SnmpVarbind(oid) for oid in oids]))
         response: SnmpResponse = await self._send(message)
         return response.data.varbinds

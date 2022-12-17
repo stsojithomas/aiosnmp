@@ -156,16 +156,16 @@ PDUs = Union[PDU, BulkPDU]
 
 
 class SnmpMessage:
-    __slots__ = ("version", "community", "usm_security_params", "data")
+    __slots__ = ("version", "community", "usm_security_model", "data")
 
     def __init__(self, version: SnmpVersion,
                  community: str,
-                 usm_security_params: UserSecurityModel,
+                 usm_security_model: UserSecurityModel,
                  data: PDUs) -> None:
         self.version: SnmpVersion = version
         self.community: str = community
         self.data: PDUs = data
-        self.usm_security_params = usm_security_params
+        self.usm_security_model: UserSecurityModel = usm_security_model
 
     def encode(self) -> bytes:
         if self.version == SnmpVersion.v3:
@@ -182,12 +182,14 @@ class SnmpMessage:
         encoder = Encoder()
         encoder.enter(Number.Sequence)
         encoder.write(self.version, Number.Integer)
-        self.usm_security_params.encode(encoder)
-        encoder.enter(Number.Sequence)
-        encoder.write(self.usm_security_params.context_engine_id, Number.OctetString)
-        encoder.write(self.usm_security_params.context_engine_name, Number.OctetString)
-        self.data.encode(encoder)
-        encoder.exit()
+        self.usm_security_model.encode(encoder)
+        scoped_pdu_encoder = Encoder()
+        scoped_pdu_encoder.enter(Number.Sequence)
+        scoped_pdu_encoder.write(binascii.unhexlify(self.usm_security_model.context_engine_id), Number.OctetString)
+        scoped_pdu_encoder.write(self.usm_security_model.context_engine_name, Number.OctetString)
+        self.data.encode(scoped_pdu_encoder)
+        scoped_pdu_encoder.exit()
+        encoder.append(scoped_pdu_encoder.output())
         encoder.exit()
         return encoder.output()
 
@@ -238,13 +240,15 @@ class SnmpResponse(SnmpMessage):
         response.request_id = request_id
         response.error_status = error_status
         response.error_index = error_index
-        return cls(version=version, community=community, usm_security_params=None, data=response)
+        return cls(version=version,
+                   community=community,
+                   usm_security_model=None,
+                   data=response)
 
     @classmethod
     def decode_v3(cls, version: SnmpVersion, decoder: Decoder) -> "SnmpResponse":
 
         msg_global_data: MsgGlobalData = MsgGlobalData.decode(decoder)
-        print(str(msg_global_data))
         usm: UserSecurityModel = UserSecurityModel.decode(decoder)
         usm.msg_global_data = msg_global_data
 
@@ -287,7 +291,7 @@ class SnmpResponse(SnmpMessage):
         response.error_index = error_index
         return cls(version=version,
                    community='',
-                   usm_security_params=usm,
+                   usm_security_model=usm,
                    data=response)
 
 

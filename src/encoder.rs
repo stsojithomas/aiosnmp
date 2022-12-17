@@ -74,6 +74,11 @@ impl Encoder {
         Ok(())
     }
 
+    fn append(&mut self, data: Vec<u8>) -> PyResult<()>{
+        self._emit(data);
+        Ok(())
+    }
+
     fn output<'a>(&self, py: Python<'a>) -> PyResult<&'a PyBytes> {
         if self.m_stack.len() != 1 {
             return Err(Error::new_err("Stack is not empty."));

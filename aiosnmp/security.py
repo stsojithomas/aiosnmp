@@ -37,6 +37,24 @@ class MsgFlags(enum.IntEnum):
     FLAG_REPORTABLE = 0x04
 
 
+class UserSecurityParams:
+    __slots__ = ("user_name",
+                 "auth_protocol", "auth_key",
+                 "priv_protocol", "priv_key")
+
+    def __init__(self,
+                 user_name: str = '',
+                 auth_protocol=None,
+                 auth_key='',
+                 priv_protocol=None,
+                 priv_key=''):
+        self.user_name = user_name
+        self.auth_protocol = auth_protocol
+        self.auth_key = auth_key
+        self.priv_protocol = priv_protocol
+        self.priv_key = priv_key
+
+
 class MsgGlobalData:
     __slots__ = ("message_id", "msg_max_size", "msg_security_model",
                  "_msg_flags",
@@ -69,11 +87,11 @@ class MsgGlobalData:
             kvp[f"{type(self)}.{attr}"] = getattr(self, attr)
         return str(kvp)
 
-    def set_flag_value(self, msg_flags):
-        self._msg_flags = msg_flags
-        self.is_reportable = msg_flags & MsgFlags.FLAG_REPORTABLE
-        self.is_authenticated = msg_flags & MsgFlags.FLAG_AUTH
-        self.is_encrypted = msg_flags & MsgFlags.FLAG_PRIV
+    def set_flag_value(self, msg_flag_val: int):
+        self._msg_flags = msg_flag_val
+        self.is_reportable = msg_flag_val & MsgFlags.FLAG_REPORTABLE > 0
+        self.is_authenticated = msg_flag_val & MsgFlags.FLAG_AUTH > 0
+        self.is_encrypted = msg_flag_val & MsgFlags.FLAG_PRIV > 0
 
     def encode(self, encoder: Encoder) -> None:
         encoder.enter(Number.Sequence)
@@ -111,17 +129,13 @@ class UserSecurityModel:
                  "priv_key", "msg_global_data")
 
     def __init__(self,
-                 user_name: str = '',
-                 auth_protocol=None,
-                 auth_key='',
-                 priv_protocol=None,
-                 priv_key='',
+                 usm_params: UserSecurityParams = UserSecurityParams(),
                  msg_global_data: MsgGlobalData = MsgGlobalData()) -> None:
-        self.user_name = user_name
-        self.auth_protocol = auth_protocol
-        self.auth_key = auth_key
-        self.priv_protocol = priv_protocol
-        self.priv_key = priv_key
+        self.user_name = usm_params.user_name
+        self.auth_protocol = usm_params.auth_protocol
+        self.auth_key = usm_params.auth_key
+        self.priv_protocol = usm_params.priv_protocol
+        self.priv_key = usm_params.priv_key
         self.security_engine_id: str = ''
         self.context_engine_id: str = ''
         self.context_engine_name: str = ''
@@ -152,6 +166,9 @@ class UserSecurityModel:
         self.engine_time = discovered_usm.engine_time
         return self
 
+    def reset_msg_id(self):
+        self.msg_global_data.message_id = random.randrange(1, 2_147_483_647)
+
     def set_discovery_mode(self) -> "UserSecurityModel":
         self.security_engine_id = ''
         self.context_engine_id = ''
@@ -164,13 +181,15 @@ class UserSecurityModel:
         self.msg_global_data.encode(encoder)
         security_encoder = Encoder()
         security_encoder.enter(Number.Sequence)
-        security_encoder.write(self.security_engine_id, Number.OctetString)
+        security_encoder.write(binascii.unhexlify(self.security_engine_id), Number.OctetString)
         security_encoder.write(self.engine_boots, Number.Integer)
         security_encoder.write(self.engine_time, Number.Integer)
         security_encoder.write(self.user_name, Number.OctetString)
+
         encrypted_auth_key = hashlib.sha1(self.auth_key.encode('UTF-8')).hexdigest() if self.auth_key else self.auth_key
         security_encoder.write(encrypted_auth_key, Number.OctetString)
-        encrypted_priv_key = hashlib.sha256(self.priv_key.encode('UTF-8')).hexdigest() if self.priv_key else self.priv_key
+        encrypted_priv_key = hashlib.sha256(
+            self.priv_key.encode('UTF-8')).hexdigest() if self.priv_key else self.priv_key
         security_encoder.write(encrypted_priv_key, Number.OctetString)
         security_encoder.exit()
         encoder.write(security_encoder.output(), Number.OctetString)
@@ -199,10 +218,13 @@ class UserSecurityModel:
         priv_key = value.decode('UTF-8')
 
         security_decoder.exit()  # UsmSecurityParameters
-        usm = cls(user_name=user_name,
-                  auth_key=auth_key,
-                  priv_key=priv_key)
-        usm.security_engine_id=security_engine_id
-        usm.engine_boots=engine_boots
-        usm.engine_time=engine_time
+        usm_params: UserSecurityParams = UserSecurityParams(
+            user_name=user_name,
+            auth_key=auth_key,
+            priv_key=priv_key
+        )
+        usm = cls(usm_params=usm_params)
+        usm.security_engine_id = security_engine_id
+        usm.engine_boots = engine_boots
+        usm.engine_time = engine_time
         return usm
